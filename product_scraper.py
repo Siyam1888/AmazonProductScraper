@@ -1,5 +1,8 @@
+import time
 import random
+from itertools import cycle
 from bs4 import BeautifulSoup
+from lxml.html import fromstring
 
 import requests
 from requests import Session
@@ -10,14 +13,42 @@ from openpyxl.styles import Font, PatternFill
 class ProductScraper:
 
     def __init__(self):
-        self.HEADERS_LIST = [
+        self.USER_AGENTS = [
             "Mozilla/5.0 (Windows; U; Windows NT 6.1; x64; fr; rv:1.9.2.13) Gecko/20101203 Firebird/3.6.13",
             "Mozilla/5.0 (Windows; U; Windows NT 6.1; rv:2.2) Gecko/20110201",
             "Opera/9.80 (X11; Linux i686; Ubuntu/14.10) Presto/2.12.388 Version/12.16",
             "Mozilla/5.0 (Windows NT 5.2; RW; rv:7.0a1) Gecko/20091211 SeaMonkey/9.23a1pre",
         ]
+        self.HEADER = {
+            'authority': 'www.amazon.com',
+            'pragma': 'no-cache',
+            'cache-control': 'no-cache',
+            'dnt': '1',
+            'upgrade-insecure-requests': '1',
+            'user-agent': random.choice(self.USER_AGENTS),
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+            'sec-fetch-site': 'none',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-dest': 'document',
+            'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+        }
 
-    def get_response(self, url):
+
+
+    def get_proxies(self):
+        "Get a list of proxies from the free-proxy-list site"
+        url = 'https://free-proxy-list.net/'
+        response = requests.get(url)
+        parser = fromstring(response.text)
+        proxies = set()
+        for i in parser.xpath('//tbody/tr')[:10]:
+            if i.xpath('.//td[7][contains(text(),"yes")]'):
+                #Grabbing IP and corresponding PORT
+                proxy = ":".join([i.xpath('.//td[1]/text()')[0], i.xpath('.//td[2]/text()')[0]])
+                proxies.add(proxy)
+        return proxies
+
+    def get_response(self, url, proxy=None):
         """Take a product URL and return the response"""
 
         # add schema to the url if it doesn't exist
@@ -25,15 +56,17 @@ class ProductScraper:
         
         # set up the request session
         session = Session()
-        header = {
-            "User-Agent": random.choice(self.HEADERS_LIST),
-            "X-Requested-With": "XMLHttpRequest",
-        }
+        header = self.HEADER
+        header['user-agent'] = random.choice(self.USER_AGENTS)
         session.headers.update(header)
-
+        print(url)
         # return the response
         try:
-            response = session.get(url)
+            if proxy:
+                response = session.get(url, proxies={"http": proxy, "https": proxy})
+            else:
+                response = session.get(url)
+
         except requests.exceptions.ConnectionError:
             print("Please Check your Internet Connection!")
             return None
@@ -41,19 +74,34 @@ class ProductScraper:
             return response
 
 
-    def scrape_product_info(self, url):
-        response = self.get_response(url)
-        soup = BeautifulSoup(response.content, 'html.parser')
+    def scrape_product_info(self, url, proxy=None):
+        url = f"https://amazon.com/dp/{url}" if 'amazon' not in url else url
+        response = self.get_response(url, proxy=proxy)
+        if response:
+            soup = BeautifulSoup(response.content, 'html.parser')
 
-        title = soup.find('span', {'id': 'productTitle'}).text.strip()
-        description = soup.find('div', {'id': 'productDescription'}).p.span.text.strip()
+            try:
+                title = soup.find('span', {'id': 'productTitle'}).text.strip()
+            except AttributeError as ae:
+                title = None
+                print(ae)
+            try:
+                description = soup.find('div', {'id': 'productDescription'}).p.span.text.strip()
+            except AttributeError as ae:
+                description = None
+                print(ae)
 
-        details_feature_div = soup.find('div', {'id': 'detailBullets_feature_div'})
-        details_list = [' '.join(span.text.split()) for span in details_feature_div.find_all('span', {'class': 'a-list-item'})]
-        details = ' | '.join(details_list)
+            try:
+                details_feature_div = soup.find('div', {'id': 'detailBullets_feature_div'})
+                details_list = [' '.join(span.text.split()) for span in details_feature_div.find_all('span', {'class': 'a-list-item'})]
+                details = ' | '.join(details_list)
+            except AttributeError as ae:
+                details = None
+                print(ae)
 
-        product_info = {'url': url,'title': title, 'description': description, 'details': details}
-        return product_info
+            product_info = {'url': url,'title': title, 'description': description, 'details': details}
+
+            return product_info
 
 
 
@@ -154,13 +202,18 @@ if __name__ == '__main__':
     excel = Excel(filename)
     scraper = ProductScraper()
 
+    
     for url in  excel.generate_inputs():
         print(f"SCRAPING... {url}")
-        product_info = scraper.scrape_product_info(url)
-
-        if product_info:
-            excel.append_output(product_info)
-    
+        try:
+            product_info = scraper.scrape_product_info(url)
+            if product_info:
+                excel.append_output(product_info)
+            print('sleeping 12 seconds')
+            time.sleep(12)
+        except Exception as e:
+            excel.wb["Errors"].append((url, str(e)))
+            print(e)
     excel.wb.save(filename)
     
     
